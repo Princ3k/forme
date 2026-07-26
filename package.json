@@ -1,0 +1,29 @@
+{
+  "name": "handoff-prototype",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Core engine prototype: expands a Figma file into a complete, named, foldered brand asset package.",
+  "bin": {
+    "handoff": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "start": "tsx src/index.ts",
+    "generate": "tsx src/index.ts generate",
+    "plan": "tsx src/index.ts plan",
+    "doctor": "tsx src/index.ts doctor",
+    "test": "tsx --test src/engine.test.ts",
+    "memcheck": "tsx memcheck.ts"
+  },
+  "dependencies": {
+    "archiver": "^7.0.1"
+  },
+  "devDependencies": {
+    "@types/archiver": "^6.0.2",
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

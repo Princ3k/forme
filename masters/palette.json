@@ -1,0 +1,9 @@
+{
+  "colours": [
+    { "name": "Brand Navy", "hex": "#1A3A5C", "rgb": { "r": 26, "g": 58, "b": 92 } },
+    { "name": "Brand Gold", "hex": "#E8B04B", "rgb": { "r": 232, "g": 176, "b": 75 } }
+  ],
+  "typography": [
+    { "name": "Display", "fontFamily": "Helvetica", "fontWeight": 700, "fontSize": 44, "lineHeightPx": 52, "letterSpacing": 0 }
+  ]
+}
