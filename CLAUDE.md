@@ -169,6 +169,10 @@ step now and is guaranteed by cairosvg.
   assertions except where a preceding check makes it provably safe.
 - Comments explain **why**, not what. If a line looks odd, say why it is odd.
 - Tests assert behaviour and invariants, not implementation shape.
+- **A behaviour change never rides along inside a refactor.** If a commit
+  described as "make X testable" also alters what X does at runtime, split it —
+  and give the behaviour change its own test. A reviewer who trusts the commit
+  message will not look for it otherwise.
 - Errors surfaced to designers are human-readable: "Figma rate limit reached,
   resuming in 47s", never "Error 429".
 

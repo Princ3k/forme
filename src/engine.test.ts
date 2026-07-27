@@ -351,18 +351,36 @@ test('README reports skipped files so the designer is never surprised', () => {
 // Rate limiting — invariant 6
 // ---------------------------------------------------------------------------
 
-/** Virtual clock: sleeping advances time, so waits are instant but observable. */
-function fakeClock(): Clock & { waits: number[]; elapsed(): number } {
+/**
+ * Virtual clock: sleeping advances time, so waits are instant but observable.
+ *
+ * `freeze()` stops sleeps from advancing time, which lets a test model a second
+ * caller arriving while another caller's sleep is still in flight — the only
+ * way to reach the concurrent path in `acquire()`.
+ */
+function fakeClock(): Clock & {
+  waits: number[];
+  elapsed(): number;
+  freeze(): void;
+  thaw(): void;
+} {
   let t = 0;
+  let advancing = true;
   const waits: number[] = [];
   return {
     now: () => t,
     sleep: async (ms: number) => {
       waits.push(ms);
-      t += ms;
+      if (advancing) t += ms;
     },
     waits,
     elapsed: () => t,
+    freeze: () => {
+      advancing = false;
+    },
+    thaw: () => {
+      advancing = true;
+    },
   };
 }
 
@@ -484,6 +502,47 @@ test('RATE LIMIT: acquire terminates after penalise rather than spinning', async
   assert.ok(clock.elapsed() >= 47_000);
   // A spin would record hundreds of tiny sleeps.
   assert.ok(clock.waits.length < 5, `spun: ${clock.waits.length} sleeps`);
+});
+
+/**
+ * This pins a real production behaviour change, not just testability.
+ *
+ * `acquire()` adds the remaining `lastRefill` gap to its wait. Without that, a
+ * caller arriving while another caller's penalise sleep is still in flight
+ * computes its wait from the token deficit alone — about 6s at 10/min — and
+ * then polls roughly every 6 seconds for the whole penalty, overshooting the
+ * true resume time by up to one poll interval.
+ *
+ * It was never incorrect (the limit was still respected), but it burned about
+ * eight wakeups per penalty and resumed late. Deleting those two lines makes
+ * this test fail; the other RATE LIMIT tests would not catch it, because in the
+ * single-caller case penalise's own sleep has already moved the clock past
+ * lastRefill by the time acquire runs.
+ */
+test('RATE LIMIT: a caller racing an in-flight penalise waits once, not in a poll loop', async () => {
+  const clock = fakeClock();
+  const limiter = new RateLimiter(PROFESSIONAL_FULL_SEAT, clock);
+
+  for (let i = 0; i < 10; i++) await limiter.acquire(1); // drain the bucket
+
+  // Freeze so penalise's own sleep does not advance our view of time — this is
+  // what a *second* caller sees while the first is still inside penalise().
+  clock.freeze();
+  await limiter.penalise(1, 47);
+  clock.thaw();
+  clock.waits.length = 0;
+
+  await limiter.acquire(1);
+
+  assert.ok(
+    clock.waits.length <= 2,
+    `polled ${clock.waits.length} times instead of waiting once: ${clock.waits.join(', ')}`,
+  );
+  assert.ok(
+    (clock.waits[0] ?? 0) >= 47_000,
+    `first wait was ${clock.waits[0]}ms, expected the full remaining penalty`,
+  );
+  assert.ok(clock.elapsed() >= 47_000);
 });
 
 // ---------------------------------------------------------------------------
