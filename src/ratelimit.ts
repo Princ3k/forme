@@ -36,20 +36,36 @@ export const ORGANIZATION_FULL_SEAT: Record<Tier, TierBudget> = {
   3: { perMinute: 100 },
 };
 
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+/**
+ * Time source. Injectable so the retry and backoff paths can be tested
+ * deterministically — with the real clock, asserting "waited exactly 47
+ * seconds" means a test that takes 47 seconds.
+ */
+export interface Clock {
+  now(): number;
+  sleep(ms: number): Promise<void>;
+}
+
+export const systemClock: Clock = {
+  now: () => Date.now(),
+  sleep: (ms: number) => new Promise((r) => setTimeout(r, ms)),
+};
 
 export class RateLimiter {
   private tokens: Record<Tier, number>;
   private lastRefill: Record<Tier, number>;
 
-  constructor(private readonly budget: Record<Tier, TierBudget> = PROFESSIONAL_FULL_SEAT) {
+  constructor(
+    private readonly budget: Record<Tier, TierBudget> = PROFESSIONAL_FULL_SEAT,
+    private readonly clock: Clock = systemClock,
+  ) {
     this.tokens = { 1: budget[1].perMinute, 2: budget[2].perMinute, 3: budget[3].perMinute };
-    const now = Date.now();
+    const now = clock.now();
     this.lastRefill = { 1: now, 2: now, 3: now };
   }
 
   private refill(tier: Tier): void {
-    const now = Date.now();
+    const now = this.clock.now();
     const last = this.lastRefill[tier];
     const elapsedMs = now - last;
     const ratePerMs = this.budget[tier].perMinute / 60_000;
@@ -68,9 +84,17 @@ export class RateLimiter {
         this.tokens[tier] -= 1;
         return;
       }
+
       const ratePerMs = this.budget[tier].perMinute / 60_000;
       const deficit = 1 - this.tokens[tier];
-      await sleep(Math.ceil(deficit / ratePerMs) + 50);
+      let waitMs = Math.ceil(deficit / ratePerMs) + 50;
+
+      // After penalise(), lastRefill sits in the future and no tokens accrue
+      // until the clock passes it. Wait out that remainder too, or this spins.
+      const until = this.lastRefill[tier] - this.clock.now();
+      if (until > 0) waitMs += until;
+
+      await this.clock.sleep(waitMs);
     }
   }
 
@@ -80,8 +104,9 @@ export class RateLimiter {
    * the bucket so concurrent callers also wait.
    */
   async penalise(tier: Tier, retryAfterSeconds: number): Promise<void> {
+    const waitMs = retryAfterSeconds * 1000;
     this.tokens[tier] = 0;
-    this.lastRefill[tier] = Date.now() + retryAfterSeconds * 1000;
-    await sleep(retryAfterSeconds * 1000);
+    this.lastRefill[tier] = this.clock.now() + waitMs;
+    await this.clock.sleep(waitMs);
   }
 }

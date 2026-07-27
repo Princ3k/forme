@@ -324,56 +324,88 @@ See 5.3. The short version: a large package exceeds the serverless memory and `/
 
 ## 7. Data model
 
+**This schema is source-agnostic by construction.** An earlier draft had `projects.figma_file_key` and `source_nodes.figma_node_id`, which would have baked Figma into the column names and broken invariant 5 at the database layer — the most expensive place to undo it. Sources are now polymorphic.
+
 ```
 users
   id, email, created_at
-  figma_access_token_enc, figma_refresh_token_enc, figma_expires_at
   google_access_token_enc, google_refresh_token_enc, google_expires_at
-  figma_seat_type          -- detected at onboarding; gate View/Collab seats
-  figma_plan_tier          -- from X-Figma-Plan-Tier; affects rate budget
+
+source_connections         -- one row per connected source, per user
+  id, user_id
+  kind                     -- 'figma' | 'vector_upload'  (extensible)
+  access_token_enc, refresh_token_enc, expires_at   -- null for vector_upload
+  seat_type                -- figma only; gate View/Collab at onboarding
+  plan_tier                -- figma only; from X-Figma-Plan-Tier
+  created_at
 
 projects
   id, user_id, name, client_name
-  figma_file_key, figma_file_name
+  source_connection_id
+  source_kind              -- denormalised for query convenience
+  source_ref               -- figma: file key. vector_upload: storage prefix
+  source_label             -- human-readable: file name or folder name
   export_matrix_id
   destination_type         -- 'drive' | 'zip' | 'both'
   drive_folder_id
   naming_template          -- e.g. '{client}_{asset}_{colourway}{scale}'
   created_at
 
+source_assets              -- was source_nodes; "node" was a Figma word
+  id, project_id
+  source_ref               -- figma: node id "1:23". vector: storage object key
+  source_name              -- original layer or file name
+  asset_slug
+  colourway                -- null if this is the base asset
+  marked_by                -- 'plugin' | 'prefix' | 'filename'
+  width_px, height_px      -- null if unknown; drives the 32MP check
+  detected_at
+
+uploaded_masters           -- vector_upload sources and print merge (5.6)
+  id, project_id
+  storage_key              -- object storage path
+  original_filename
+  kind                     -- 'vector_master' | 'print_asset'
+  format                   -- 'svg' | 'pdf' | 'eps' | 'ai'
+  bytes, content_hash
+  uploaded_at
+
 export_matrices
   id, user_id, name, is_preset
   colourways               -- jsonb: ['full-colour','mono-black','mono-white']
-  formats                  -- jsonb: ['svg','png','pdf']
+  formats                  -- jsonb: ['svg','png','pdf','eps','pdf-cmyk']
   scales                   -- jsonb: [1,2,3]
   folder_template          -- jsonb: folder tree structure
-
-source_nodes
-  id, project_id
-  figma_node_id, node_name, asset_slug
-  colourway                -- null if this node is the base
-  detected_at
+  naming_template
 
 generations                -- replaces v1's sync_jobs
   id, project_id
   trigger                  -- 'manual' | 'webhook' | 'scheduled'
   status                   -- 'queued'|'fetching'|'rendering'|'packaging'|'delivering'|'complete'|'failed'
   files_expected, files_completed
+  files_colour_unverified  -- excluded from the ready-to-send count
+  unsupported_formats      -- jsonb; formats this source could not produce
   error_code, error_detail
-  drive_folder_id, zip_url
+  drive_folder_id, zip_storage_key
   started_at, completed_at
 
 generated_files            -- replaces v1's assets
-  id, generation_id, source_node_id
+  id, generation_id, source_asset_id
   filename, folder_path
   format, scale, colourway
+  colour_unverified        -- bool NOT NULL DEFAULT false; see invariant 4
   content_hash             -- for delta detection on regeneration
   bytes
   drive_file_id
-  status                   -- 'pending'|'rendered'|'uploaded'|'failed'
+  status                   -- 'pending'|'rendered'|'uploaded'|'skipped'|'failed'
+  skip_reason              -- surfaced in the client README
 ```
 
-Note the rename: **`generations`, not `sync_jobs`.** The unit of work is producing a package, not syncing a file. If the schema still says "sync," the team will keep building v1.
+Three things worth stating explicitly, because each encodes an invariant:
+
+- **No `figma_` prefixed columns anywhere.** `source_kind` + `source_ref` is the polymorphic pair. Adding Illustrator or Dropbox is a new `kind` value and a new adapter, not a migration.
+- **`generated_files.colour_unverified` is persisted, not computed.** Invariant 4 requires excluding machine-converted CMYK from ready-to-send counts, and that count has to survive a page reload.
+- **`generations`, not `sync_jobs`.** The unit of work is producing a package, not syncing a file. If the schema still says "sync," the team will keep building v1.
 
 ---
 

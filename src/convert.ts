@@ -39,19 +39,37 @@ export const CONVERTIBLE: ReadonlySet<Format> = new Set<Format>([
   'pdf-cmyk',
 ]);
 
-/** Checks that the external binaries are actually present. */
+/**
+ * Verifies every external dependency this module actually invokes.
+ *
+ * This must stay exhaustive. A preflight that passes while a conversion path is
+ * missing its binary is worse than no preflight: the failure then surfaces
+ * per-file, mid-package, after the designer has already waited.
+ *
+ * Pillow is checked explicitly even though cairosvg declares it as a hard
+ * dependency — a broken or partial install should be caught here, not at the
+ * first JPEG.
+ */
 export async function checkToolchain(): Promise<{ ok: boolean; missing: string[] }> {
   const missing: string[] = [];
 
   try {
     await exec('python3', ['-c', 'import cairosvg']);
   } catch {
-    missing.push('cairosvg (pip install cairosvg)');
+    missing.push('cairosvg  (pip3 install cairosvg)');
   }
+
+  try {
+    // Used for the PNG -> JPEG step. Ships with cairosvg, but verify.
+    await exec('python3', ['-c', 'import PIL']);
+  } catch {
+    missing.push('Pillow    (pip3 install pillow)');
+  }
+
   try {
     await exec('gs', ['--version']);
   } catch {
-    missing.push('ghostscript (apt install ghostscript)');
+    missing.push('ghostscript  (brew install ghostscript / apt install ghostscript)');
   }
 
   return { ok: missing.length === 0, missing };
@@ -99,7 +117,7 @@ export async function convertSvg(
       case 'png':
       case 'jpg': {
         const out = join(dir, `out.${format}`);
-        // cairosvg emits PNG; JPG goes via PNG since cairo has no JPEG target.
+        // cairo has no JPEG target, so JPG goes via PNG.
         const png = format === 'png' ? out : join(dir, 'out.png');
         await exec('python3', [
           '-c',
@@ -108,9 +126,28 @@ export async function convertSvg(
           png,
           String(scale),
         ]);
+
         if (format === 'jpg') {
-          await exec('convert', [png, '-background', 'white', '-flatten', out]);
+          // Pillow rather than ImageMagick. Pillow is a hard dependency of
+          // cairosvg so it is guaranteed present; ImageMagick was an undeclared
+          // dependency the preflight never checked, and its binary was renamed
+          // `convert` -> `magick` in v7, so the old call was broken on any
+          // current install.
+          //
+          // JPEG has no alpha channel, so transparency is composited onto white
+          // rather than turning black.
+          await exec('python3', [
+            '-c',
+            'import sys;from PIL import Image;' +
+              'im=Image.open(sys.argv[1]).convert("RGBA");' +
+              'bg=Image.new("RGB",im.size,(255,255,255));' +
+              'bg.paste(im,mask=im.split()[3]);' +
+              'bg.save(sys.argv[2],"JPEG",quality=92,optimize=True)',
+            png,
+            out,
+          ]);
         }
+
         return await readFile(out);
       }
 

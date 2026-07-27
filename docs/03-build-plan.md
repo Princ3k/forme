@@ -3,6 +3,29 @@
 
 ---
 
+## Status — read this first
+
+**The prototype already implements most of Phase 1.** Epics 1.2, 1.2b and 1.3
+are largely built and tested in this repo: 34 passing tests, clean typecheck,
+memcheck at ~7MB RSS for 1.5GB of payload. Roughly 18 of the 22 days those
+epics budget are already spent.
+
+Tickets below are marked:
+
+- **[DONE]** — built and tested in the prototype
+- **[HARDEN]** — logic exists, needs productionising (config, errors, wiring)
+- no marker — genuinely outstanding
+
+**Revised Phase 1 estimate: 1.5–2 weeks, not 3–4.** What actually remains is
+Epic 1.1 (foundations), Epic 1.4 (orchestration), the S3 sink, and hardening.
+
+**But do not start Phase 1 yet.** Phase 0 needs no Epic 1.1 ticket — validation
+runs entirely off the CLI on the vector source. Install the toolchain, generate
+three real packages, talk to eight designers. That is the cheapest next move by
+a wide margin.
+
+---
+
 ## What changed in this revision
 
 The engine is no longer Figma-only. Figma is one `SourceAdapter`; a vector-master adapter (local SVG→PNG/PDF/EPS/CMYK conversion) is the second. Consequences for this plan:
@@ -25,6 +48,7 @@ Estimates assume one competent full-stack developer. Halve nothing.
 
 | # | Ticket | Detail | Done when |
 | --- | --- | --- | --- |
+| 0.0 | **Install the conversion toolchain** | `pip3 install cairosvg && brew install ghostscript`, then `npm run doctor` until green. **0.1 is blocked until this passes** — the vector source is the Phase 0 critical path and it shells out | `npm run doctor` reports all present |
 | 0.1 | Run the prototype against 3 real brand identities | **Use the vector source** — ask for a folder of SVGs. No OAuth, no plugin, works regardless of their tool | You have 3 generated packages to show |
 | 0.2 | Time a real manual handoff | Screen-record a designer doing one end to end. Log where every minute goes | You have a per-step time breakdown, not an estimate |
 | 0.3 | Interview 8–10 freelance brand designers | Script in PRD §9. Focus on: print-format share, current tooling, willingness to send generated output unedited | 8+ completed calls, written up |
@@ -46,49 +70,52 @@ The point of this phase is a working generation pipeline for one hardcoded user.
 ### Epic 1.1 — Foundations
 | # | Ticket | Est. |
 | --- | --- | --- |
-| 1.1.1 | Next.js + TypeScript + Tailwind scaffold; env config; CI with typecheck and lint | 1d |
-| 1.1.2 | Supabase project; schema migration for all tables in PRD §7; **RLS policies on every table from day one** | 1d |
+| 1.1.1 | Next.js + TypeScript + Tailwind scaffold; env config; CI running typecheck, tests and memcheck. **Add ESLint — there is currently no linter at all, only a typecheck script** | 1.5d |
+| 1.1.2 | Supabase project; schema migration for PRD §7. **§7 was rewritten to be source-agnostic — no `figma_` columns. Use `source_kind` + `source_ref`, and note `generated_files.colour_unverified` must be persisted (invariant 4).** RLS on every table from day one | 1.5d |
 | 1.1.3 | Token encryption helper (AES-GCM, key from env/KMS). Unit tested. No plaintext tokens, ever | 0.5d |
-| 1.1.4 | Upstash Redis token-bucket limiter, keyed per user per tier | 1d |
+| ~~1.1.4~~ | ~~Upstash Redis token-bucket limiter~~ **CUT from Phase 1.** Phase 1 targets one hardcoded user; a distributed limiter for one user is premature. The in-process `RateLimiter` is correct and now tested. Inngest also ships per-key `concurrency` and `throttle`, which covers most of this declaratively — and Inngest is already committed in 1.4.1. Revisit when Epic 2.1 introduces real multi-tenancy | — |
 
 ### Epic 1.2 — Source adapters
 | # | Ticket | Est. |
 | --- | --- | --- |
-| 1.2.0a | `SourceAdapter` interface + `AdapterCapabilities`. Matrix planner drops formats the source can't produce and reports them once, up front | 1d |
-| 1.2.0b | **Vector-master adapter**: ingest SVG folder, filename convention `<asset>[.<colourway>].svg`, optional `palette.json`. cairosvg + Ghostscript for PNG/PDF/EPS/CMYK. **Build this first — Phase 0 depends on it** | 2.5d |
-| 1.2.0c | Toolchain preflight (`doctor`): verify cairosvg and Ghostscript present, fail with install instructions rather than mid-package | 0.5d |
-| 1.2.0d | CMYK fidelity guard: flag machine-converted files `colourUnverified`, exclude from ready-to-send counts, prominent README warning | 0.5d |
+| 1.2.0a | **[DONE]** `SourceAdapter` interface + `AdapterCapabilities`. Planner drops unsupported formats and reports them once, up front | — |
+| 1.2.0b | **[DONE]** Vector-master adapter: SVG folder, `<asset>[.<colourway>].svg`, optional `palette.json`, cairosvg + Ghostscript + Pillow | — |
+| 1.2.0c | **[DONE]** Toolchain preflight (`doctor`). Probes cairosvg, Pillow and Ghostscript. **Keep exhaustive:** every binary `convert.ts` invokes must be probed here, or failures surface per-file mid-package | — |
+| 1.2.0d | **[DONE]** CMYK fidelity guard: `colourUnverified` flag, excluded from ready-to-send, prominent README warning | — |
+| 1.2.0e | **[HARDEN]** Vector adapter currently reads from a local directory. Repoint at object storage for uploaded masters | 1d |
 
 ### Epic 1.2b — Figma adapter
 | # | Ticket | Est. |
 | --- | --- | --- |
-| 1.2.1 | Typed Figma REST client wrapping every call in the rate limiter | 1d |
-| 1.2.2 | **429 handling: read `Retry-After` and sleep exactly that long.** Capture `X-Figma-Plan-Tier` and `X-Figma-Upgrade-Link`. Unit test with a mocked 429 | 1d |
-| 1.2.3 | `GET /v1/files/:key` + document tree walker; find `@export/`-prefixed nodes and colourway siblings | 1.5d |
-| 1.2.4 | Local style extraction → palette + typography JSON. **Not** the Variables API (Enterprise-gated) | 1.5d |
-| 1.2.5 | **Batched image rendering: one `/v1/images` call per (format, scale) with all node IDs.** This is the single most important ticket in the phase — a per-asset implementation makes the product unusable | 2d |
-| 1.2.6 | Parallel download of returned S3 URLs with a concurrency cap | 0.5d |
+| 1.2.1 | **[DONE]** Typed Figma REST client wrapping every call in the rate limiter | — |
+| 1.2.2 | **[DONE]** 429 handling honouring exact `Retry-After`; captures `X-Figma-Plan-Tier` and `X-Figma-Upgrade-Link`. Six `RATE LIMIT:` tests against an injected clock and stubbed fetch | — |
+| 1.2.3 | **[DONE]** `GET /v1/files/:key?plugin_data=shared` + tree walker; plugin data and `@export/` prefix, with colourway siblings | — |
+| 1.2.4 | **[DONE]** Local style extraction → palette + typography JSON. Not the Variables API (Enterprise-gated) | — |
+| 1.2.5 | **[DONE]** Batched image rendering, one `/v1/images` call per (format, scale). Two `BATCHING:` tests lock this in — 200 files cost 6 Tier 1 requests | — |
+| 1.2.6 | **[DONE]** Bounded-concurrency download via `orderedPrefetch` | — |
+| 1.2.7 | **[HARDEN]** Wire `onRateLimit` through to generation progress so the UI shows "resuming in 47s" (satisfies 2.5.3) | 0.5d |
 
 ### Epic 1.3 — Packaging (streaming throughout)
 | # | Ticket | Est. |
 | --- | --- | --- |
-| 1.3.1 | Export Matrix expander: (nodes × colourways × formats × scales) → file plan | 1.5d |
-| 1.3.2 | Naming template engine (`{client}_{asset}_{colourway}{scale}`) with slug sanitisation and collision guard | 1d |
-| 1.3.3 | Folder tree assembler from matrix `folder_template` | 1d |
-| 1.3.4 | README.txt generator — contents, usage guidance, copyable colour values, list of anything that failed | 0.5d |
-| 1.3.5 | **Streaming zip: `archiver` piped into an S3 multipart `Upload`.** Ordered prefetch window for bounded concurrency; `store` for PNG/JPG/PDF, deflate for text. Nothing buffered | 2d |
-| 1.3.6 | Content hashing via an in-stream transform, persisted for delta detection | 0.5d |
-| 1.3.7 | **Memory benchmark in CI.** Push >1GB of synthetic payload through the real path and fail the build if RSS growth exceeds 100MB. This is the regression guard for 1.3.5 | 0.5d |
-| 1.3.8 | 32MP downscale detection — warn at plan time with the max safe scale for each artboard | 0.5d |
+| 1.3.1 | **[DONE]** Export Matrix expander: (assets × colourways × formats × scales) → file plan | — |
+| 1.3.2 | **[DONE]** Naming template engine with slug sanitisation and path-collision guard | — |
+| 1.3.3 | **[DONE]** Folder tree assembler from matrix `folder_template` | — |
+| 1.3.4 | **[DONE]** README.txt generator — contents, usage guidance, colour values, skipped-file list, CMYK warning | — |
+| 1.3.5 | **[HARDEN]** Streaming zip is done and benchmarked, piping into any `Writable`. **Outstanding: the S3 sink.** `@aws-sdk/lib-storage` `Upload` accepts a stream directly, so this is hours, not days — it was previously unowned by any ticket | 0.5d |
+| 1.3.6 | **[DONE]** In-stream content hashing via `HashingPassThrough` | — |
+| 1.3.7 | **[HARDEN]** `npm run memcheck` exists and passes (~7MB for 1.5GB). Outstanding: wire it into CI | 0.25d |
+| 1.3.8 | **[DONE]** 32MP downscale detection with max safe scale per artboard | — |
 
 ### Epic 1.4 — Orchestration
 | # | Ticket | Est. |
 | --- | --- | --- |
-| 1.4.1 | Inngest setup; `generation.requested` event | 0.5d |
+| 1.4.1 | Inngest setup; `generation.requested` event. Use per-key `throttle`/`concurrency` for Figma rate budget rather than a separate Redis limiter (see cut 1.1.4) | 1d |
 | 1.4.2 | Generation step function: fetch → parse → render → stream-package → deliver, with per-step retry. **Step return values carry keys and manifests only — never file contents.** Inngest persists step output and size-limits it | 2d |
 | 1.4.3 | Progress persistence to `generations` + `generated_files`; failure states carry a usable error message | 1d |
 
-**Phase 1 exit:** a script generates a complete, correctly named, correctly foldered zip from a real Figma file without hitting a rate limit — and the memory benchmark passes.
+**Phase 1 exit:** the existing engine runs as a durable background job against
+both sources, writing to object storage, with the memory benchmark green in CI.
 
 ---
 
@@ -109,7 +136,7 @@ The point of this phase is a working generation pipeline for one hardcoded user.
 | 2.2.2 | **Marking UI: select frame → assign asset role + colourway.** Writes `setSharedPluginData('handoff', …)`. Never renames the designer's layers | 2.5d |
 | 2.2.3 | Panel showing everything currently marked in the file, with unmark and re-assign | 2d |
 | 2.2.4 | Backend reads markings via `GET /v1/files/:key?plugin_data=shared`; `@export/` prefix retained as fallback | 1d |
-| 2.2.5 | Figma Community listing: description, cover art, submission. **Check review turnaround early — it may gate launch** | 1d |
+| 2.2.5 | Figma Community listing: description, cover art, submission. Depends on 2.2.1–2.2.4, so it cannot literally start early. **What can be front-loaded, in Phase 0/1:** read the Community review guidelines, confirm current review turnaround, and prepare cover art and copy. Do that, then submit the day the plugin works | 1d |
 
 ### Epic 2.3 — Project setup UI
 | # | Ticket | Est. |
@@ -194,7 +221,11 @@ Note the reordering: **the vector adapter now precedes validation, and Figma fol
 - **1.2.5 (batched rendering).** Everything downstream assumes generation fits a 10 req/min budget. Load-test against a real 200-file package before any UI work.
 - **1.3.5 (streaming zip).** If this buffers, large packages OOM on serverless — and large packages are exactly the ones worth automating. Pair it with 1.3.7 so the guarantee is enforced by CI rather than by memory.
 
-**Start 2.2.5 (Figma Community submission) early.** Review turnaround is outside your control and it is the distribution channel, not a nice-to-have.
+**Front-load the Figma Community *research*, not the submission.** The listing
+itself depends on a working plugin (2.2.1–2.2.4), so it cannot start early. What
+you can do now is confirm the review turnaround and prepare the assets, so
+submission is same-day once the plugin lands. Review time is outside your
+control and this is the distribution channel, not a nice-to-have.
 
 ---
 

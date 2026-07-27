@@ -18,16 +18,28 @@ hand takes 4–5 unbillable hours per project.
 
 ## Reference documents
 
-- `../02-revised-prd.md` — requirements, verified API constraints, validation plan
-- `../03-build-plan.md` — epics, tickets, sequencing, risk register
-- `../01-market-scan.md` — competitors and positioning
+- `docs/02-revised-prd.md` — requirements, verified API constraints, validation plan
+- `docs/03-build-plan.md` — epics, tickets, sequencing, risk register
+- `docs/01-market-scan.md` — competitors and positioning
+- `docs/04-claude-code-setup.md` — session workflow
+
+This repo *is* the prototype; there is no `prototype/` subdirectory.
 
 Do not start Phase 1 work until Phase 0 validation in PRD §9 is complete.
 
 ## Invariants — do not break these
 
-These have tests attached. If a test named in caps fails, you have broken a
+Each has tests attached, named in caps. If one fails you have broken a
 load-bearing property, not a detail.
+
+| # | Invariant | Guarded by |
+| --- | --- | --- |
+| 1 | Batched rendering | `BATCHING:` tests |
+| 2 | Streaming packaging | `STREAMING:` tests + `npm run memcheck` |
+| 3 | Missing colourways reported | `missing colourways are reported…` |
+| 4 | CMYK never presented as correct | `CMYK output is flagged unverified…` |
+| 5 | Source-agnostic engine | `ADAPTER:` tests |
+| 6 | Exact `Retry-After` | `RATE LIMIT:` tests |
 
 ### 1. Rendering is batched by (format, scale), never per file
 
@@ -90,6 +102,14 @@ touching the pipeline.
 `src/figma.ts`. Figma tells you precisely how long to wait. A generic
 exponential backoff is strictly worse.
 
+`FigmaClient` and `RateLimiter` take an injectable `Clock` and `fetchImpl`
+precisely so this is testable — with the real clock, asserting "waited exactly
+47 seconds" means a 47-second test. Do not remove the seams.
+
+Note `acquire()` also has to wait out `lastRefill` when it sits in the future
+after `penalise()`, or it spins. Test: `RATE LIMIT: acquire terminates after
+penalise rather than spinning`.
+
 ## Verified API facts — do not "correct" these
 
 Checked against live Figma docs, July 2026:
@@ -113,13 +133,35 @@ Checked against live Figma docs, July 2026:
 ## Commands
 
 ```bash
-npm test          # 28 tests, no network needed
-npm run memcheck  # streaming regression guard
-npm run doctor    # check cairosvg + ghostscript for the vector source
+npm test
+npm run memcheck
+npm run doctor
 npm run plan -- --client "Acme"
 npm run start -- generate --client "Acme" --vectors ./masters --preset full-brand-package
-npm run start -- generate --client "Acme" --figma <url>   # needs FIGMA_TOKEN
+npm run start -- generate --client "Acme" --figma <url>
 ```
+
+34 tests, no network needed. `memcheck` is the streaming regression guard.
+`doctor` verifies the vector toolchain. The Figma path needs `FIGMA_TOKEN`.
+
+### External dependencies
+
+The vector source shells out. **Every binary invoked must be probed by
+`checkToolchain()`** — a preflight that passes while a conversion path is
+missing its binary is worse than no preflight, because the failure then
+surfaces per-file, mid-package, after the designer has waited.
+
+Currently required: `python3` with `cairosvg` and `PIL`, plus `gs`.
+
+```bash
+pip3 install cairosvg          # brings Pillow with it
+brew install ghostscript
+```
+
+There is deliberately **no ImageMagick dependency**. An earlier version shelled
+out to `convert` for JPEG without probing for it, and ImageMagick 7 renamed the
+binary to `magick`, so it was broken on any current install. Pillow does that
+step now and is guaranteed by cairosvg.
 
 ## Conventions
 

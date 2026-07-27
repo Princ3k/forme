@@ -7,7 +7,14 @@
  * per-asset call pattern that makes the product unusable.
  */
 
-import { RateLimiter, type Tier, PROFESSIONAL_FULL_SEAT, type TierBudget } from './ratelimit.js';
+import {
+  RateLimiter,
+  systemClock,
+  type Clock,
+  type Tier,
+  PROFESSIONAL_FULL_SEAT,
+  type TierBudget,
+} from './ratelimit.js';
 import type { SourceNode, RenderBatch, Format, ExtractedTokens, ColourStyle, TextStyle } from './types.js';
 
 const API = 'https://api.figma.com';
@@ -64,15 +71,54 @@ interface FigmaImagesResponse {
   images: Record<string, string | null>;
 }
 
+/** Minimal shape of `fetch`, so tests can substitute a stub. */
+export type FetchLike = (
+  url: string,
+  init?: { headers?: Record<string, string> },
+) => Promise<{
+  status: number;
+  ok: boolean;
+  headers: { get(name: string): string | null };
+  json(): Promise<unknown>;
+  text(): Promise<string>;
+}>;
+
+export interface RateLimitNotice {
+  tier: Tier;
+  retryAfterSeconds: number;
+  attempt: number;
+  planTier: string | null;
+  upgradeLink: string | null;
+}
+
+export interface FigmaClientOptions {
+  budget?: Record<Tier, TierBudget>;
+  maxRetries?: number;
+  /** Injectable for tests. Defaults to global fetch. */
+  fetchImpl?: FetchLike;
+  /** Injectable for tests. Defaults to the system clock. */
+  clock?: Clock;
+  /** Called on each 429, so the UI can report the wait rather than hang. */
+  onRateLimit?: (notice: RateLimitNotice) => void;
+}
+
 export class FigmaClient {
   private readonly limiter: RateLimiter;
+  private readonly maxRetries: number;
+  private readonly fetchImpl: FetchLike;
+  private readonly onRateLimit: ((notice: RateLimitNotice) => void) | undefined;
 
   constructor(
     private readonly accessToken: string,
-    budget: Record<Tier, TierBudget> = PROFESSIONAL_FULL_SEAT,
-    private readonly maxRetries = 5,
+    options: FigmaClientOptions = {},
   ) {
-    this.limiter = new RateLimiter(budget);
+    this.limiter = new RateLimiter(
+      options.budget ?? PROFESSIONAL_FULL_SEAT,
+      options.clock ?? systemClock,
+    );
+    this.maxRetries = options.maxRetries ?? 5;
+    this.fetchImpl = options.fetchImpl ?? (globalThis.fetch as unknown as FetchLike);
+    this.onRateLimit = options.onRateLimit;
   }
 
   private async request<T>(path: string, tier: Tier): Promise<T> {
@@ -80,7 +126,7 @@ export class FigmaClient {
     for (;;) {
       await this.limiter.acquire(tier);
 
-      const res = await fetch(`${API}${path}`, {
+      const res = await this.fetchImpl(`${API}${path}`, {
         headers: { Authorization: `Bearer ${this.accessToken}` },
       });
 
@@ -99,9 +145,9 @@ export class FigmaClient {
         }
 
         // Honour Figma's exact Retry-After rather than guessing a backoff.
-        process.stderr.write(
-          `  rate limited (tier ${tier}), resuming in ${retryAfter}s...\n`,
-        );
+        // Surfaced as a callback rather than written to stderr so the UI can
+        // show "resuming in 47s" instead of the designer seeing nothing.
+        this.onRateLimit?.({ tier, retryAfterSeconds: retryAfter, attempt, planTier, upgradeLink });
         await this.limiter.penalise(tier, retryAfter);
         continue;
       }

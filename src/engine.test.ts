@@ -9,7 +9,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Readable, Writable } from 'node:stream';
 import { expandMatrix, planBatches, renderFilename, slugify, PRESETS, buildPlan, checkMegapixels } from './matrix.js';
-import { findExportNodes } from './figma.js';
+import { findExportNodes, FigmaClient, FigmaRateLimitError, FigmaApiError } from './figma.js';
+import { RateLimiter, PROFESSIONAL_FULL_SEAT, type Clock } from './ratelimit.js';
 import { diffPackages, streamPackage, PRECOMPRESSED, buildReadme } from './packager.js';
 import { orderedPrefetch, HashingPassThrough } from './stream.js';
 import { svgDimensions } from './convert.js';
@@ -344,6 +345,145 @@ test('README reports skipped files so the designer is never surprised', () => {
 
   assert.match(text, /1 file\(s\) could not be generated/);
   assert.match(text, /HTTP 500/);
+});
+
+// ---------------------------------------------------------------------------
+// Rate limiting — invariant 6
+// ---------------------------------------------------------------------------
+
+/** Virtual clock: sleeping advances time, so waits are instant but observable. */
+function fakeClock(): Clock & { waits: number[]; elapsed(): number } {
+  let t = 0;
+  const waits: number[] = [];
+  return {
+    now: () => t,
+    sleep: async (ms: number) => {
+      waits.push(ms);
+      t += ms;
+    },
+    waits,
+    elapsed: () => t,
+  };
+}
+
+function response(status: number, headers: Record<string, string> = {}, body: unknown = {}) {
+  return {
+    status,
+    ok: status >= 200 && status < 300,
+    headers: { get: (n: string) => headers[n.toLowerCase()] ?? null },
+    json: async () => body,
+    text: async () => JSON.stringify(body),
+  };
+}
+
+test('RATE LIMIT: a 429 waits exactly Retry-After, not a guessed backoff', async () => {
+  const clock = fakeClock();
+  const notices: number[] = [];
+  let calls = 0;
+
+  const client = new FigmaClient('token', {
+    clock,
+    onRateLimit: (n) => notices.push(n.retryAfterSeconds),
+    fetchImpl: async () => {
+      calls++;
+      return calls === 1
+        ? response(429, { 'retry-after': '47' })
+        : response(200, {}, { name: 'File', document: { id: '0:0', name: 'd', type: 'DOCUMENT' } });
+    },
+  });
+
+  await client.getFile('KEY');
+
+  assert.equal(calls, 2, 'should retry once');
+  assert.deepEqual(notices, [47]);
+  // Exactly 47s of penalty. A generic exponential backoff would differ.
+  assert.ok(clock.waits.includes(47_000), `waits were ${clock.waits.join(', ')}`);
+});
+
+test('RATE LIMIT: a missing Retry-After header falls back to 60s', async () => {
+  const clock = fakeClock();
+  let calls = 0;
+
+  const client = new FigmaClient('token', {
+    clock,
+    fetchImpl: async () => {
+      calls++;
+      return calls === 1
+        ? response(429, {})
+        : response(200, {}, { name: 'F', document: { id: '0:0', name: 'd', type: 'DOCUMENT' } });
+    },
+  });
+
+  await client.getFile('KEY');
+  assert.ok(clock.waits.includes(60_000));
+});
+
+test('RATE LIMIT: exhausting retries surfaces the upgrade link and plan tier', async () => {
+  const clock = fakeClock();
+
+  const client = new FigmaClient('token', {
+    clock,
+    maxRetries: 2,
+    fetchImpl: async () =>
+      response(429, {
+        'retry-after': '30',
+        'x-figma-plan-tier': 'pro',
+        'x-figma-upgrade-link': 'https://figma.com/pricing',
+      }),
+  });
+
+  await assert.rejects(
+    () => client.getFile('KEY'),
+    (err: unknown) => {
+      assert.ok(err instanceof FigmaRateLimitError);
+      // These drive the "your seat can't do this" message at onboarding.
+      assert.equal(err.planTier, 'pro');
+      assert.equal(err.upgradeLink, 'https://figma.com/pricing');
+      assert.equal(err.retryAfterSeconds, 30);
+      return true;
+    },
+  );
+});
+
+test('RATE LIMIT: non-429 errors are not retried', async () => {
+  const clock = fakeClock();
+  let calls = 0;
+
+  const client = new FigmaClient('token', {
+    clock,
+    fetchImpl: async () => {
+      calls++;
+      return response(403, {}, { err: 'Invalid token' });
+    },
+  });
+
+  await assert.rejects(() => client.getFile('KEY'), FigmaApiError);
+  assert.equal(calls, 1, 'a 403 must fail immediately, not burn retries');
+});
+
+test('RATE LIMIT: the bucket caps Tier 1 at the plan budget', async () => {
+  const clock = fakeClock();
+  // Budget of 10/min: the 11th acquire must wait.
+  const limiter = new RateLimiter(PROFESSIONAL_FULL_SEAT, clock);
+
+  for (let i = 0; i < 10; i++) await limiter.acquire(1);
+  assert.equal(clock.waits.length, 0, 'first 10 should not wait');
+
+  await limiter.acquire(1);
+  assert.ok(clock.waits.length > 0, '11th request must wait for a token');
+});
+
+test('RATE LIMIT: acquire terminates after penalise rather than spinning', async () => {
+  const clock = fakeClock();
+  const limiter = new RateLimiter(PROFESSIONAL_FULL_SEAT, clock);
+
+  // penalise pushes lastRefill into the future; acquire must wait that out.
+  await limiter.penalise(1, 47);
+  await limiter.acquire(1);
+
+  assert.ok(clock.elapsed() >= 47_000);
+  // A spin would record hundreds of tiny sleeps.
+  assert.ok(clock.waits.length < 5, `spun: ${clock.waits.length} sleeps`);
 });
 
 // ---------------------------------------------------------------------------
