@@ -335,8 +335,7 @@ source_connections         -- one row per connected source, per user
   id, user_id
   kind                     -- 'figma' | 'vector_upload'  (extensible)
   access_token_enc, refresh_token_enc, expires_at   -- null for vector_upload
-  seat_type                -- figma only; gate View/Collab at onboarding
-  plan_tier                -- figma only; from X-Figma-Plan-Tier
+  metadata                 -- jsonb; shape is per-kind, see below
   created_at
 
 projects
@@ -401,11 +400,48 @@ generated_files            -- replaces v1's assets
   skip_reason              -- surfaced in the client README
 ```
 
-Three things worth stating explicitly, because each encodes an invariant:
+### The rule for what belongs on a shared table
 
-- **No `figma_` prefixed columns anywhere.** `source_kind` + `source_ref` is the polymorphic pair. Adding Illustrator or Dropbox is a new `kind` value and a new adapter, not a migration.
-- **`generated_files.colour_unverified` is persisted, not computed.** Invariant 4 requires excluding machine-converted CMYK from ready-to-send counts, and that count has to survive a page reload.
-- **`generations`, not `sync_jobs`.** The unit of work is producing a package, not syncing a file. If the schema still says "sync," the team will keep building v1.
+An earlier revision of this section claimed to be source-agnostic while still
+carrying `seat_type` and `plan_tier` on `source_connections`. Those are Figma
+concepts — they exist to gate View/Collab seats, which get 6 Tier 1 requests a
+*month*. Dropping the `figma_` prefix did not make them polymorphic; it just
+evaded the naming rule while leaving the coupling in place.
+
+The actual rule:
+
+> A column earns a place on a shared table if it applies to **most** source
+> kinds. A field that applies to exactly one kind goes in `metadata`.
+
+By that test, the token columns stay — OAuth applies to Figma, Dropbox, Sketch
+Cloud and every remote source we might add; `vector_upload` is the exception,
+not the rule. Seat and plan tier apply to Figma alone, so they move:
+
+```
+metadata shapes by kind:
+
+  figma          { "seat_type": "full" | "dev" | "view" | "collab",
+                   "plan_tier": "starter" | "pro" | "org" | "enterprise" }
+
+  vector_upload  { }
+```
+
+Adapters own their own metadata shape. The pipeline never reads it — only the
+onboarding gate and the rate-limit budget do, both of which are already
+adapter-scoped via `AdapterCapabilities`.
+
+### Three things worth stating explicitly, because each encodes an invariant
+
+- **No source-specific columns on shared tables**, by name *or* by meaning.
+  `source_kind` + `source_ref` is the polymorphic pair; `metadata` absorbs the
+  rest. Adding Illustrator or Dropbox is a new `kind` value and a new adapter,
+  not a migration.
+- **`generated_files.colour_unverified` is persisted, not computed.** Invariant
+  4 requires excluding machine-converted CMYK from ready-to-send counts, and
+  that count has to survive a page reload.
+- **`generations`, not `sync_jobs`.** The unit of work is producing a package,
+  not syncing a file. If the schema still says "sync," the team will keep
+  building v1.
 
 ---
 
